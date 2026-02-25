@@ -379,6 +379,13 @@ public:
 // Non-member functions
 //==============================================================================
 
+// [TESE] Estrutura auxiliar para guardar os dados da matriz lidos do XML
+// antes de aplicar às superfícies (especialmente as periódicas).
+struct MgAlbedoData {
+  std::vector<double> energy_grid;
+  std::vector<double> matrix;
+};
+
 //! Read surface definitions from XML and populate the global surfaces vector.
 //!
 //! This function parses surface elements from the XML input, creates the
@@ -395,7 +402,8 @@ public:
 void read_surfaces(pugi::xml_node node,
   std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map);
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map); // [TESE] Novo mapa
 
 //! Resolve periodic surface pairs and assign boundary conditions.
 //!
@@ -411,7 +419,8 @@ void read_surfaces(pugi::xml_node node,
 //!   determine orientation for periodic BCs)
 void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map);
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map); // [TESE] Novo mapa
 
 void free_memory_surfaces();
 

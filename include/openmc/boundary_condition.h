@@ -4,6 +4,7 @@
 #include "openmc/hdf5_interface.h"
 #include "openmc/particle.h"
 #include "openmc/position.h"
+#include "openmc/vector.h"
 #include <fmt/core.h>
 
 namespace openmc {
@@ -64,8 +65,22 @@ public:
   //! Return if this BC has an albedo.
   bool has_albedo() const { return (albedo_ > 0.0); }
 
+  // [TESE] Setters para a matriz
+  void set_mg_albedo(const openmc::vector<double>& energy_grid, const openmc::vector<double>& matrix) {
+    albedo_energy_grid_ = energy_grid;
+    albedo_matrix_ = matrix;
+    has_mg_albedo_ = true;
+  }
+  // [TESE] Verifica se matriz foi setada
+  bool has_mg_albedo() const { return has_mg_albedo_; }
+
 private:
   double albedo_ = -1.0;
+
+  // [TESE] Variáveis da matriz
+  bool has_mg_albedo_ {false};
+  openmc::vector<double> albedo_energy_grid_;
+  openmc::vector<double> albedo_matrix_;
 };
 
 //==============================================================================

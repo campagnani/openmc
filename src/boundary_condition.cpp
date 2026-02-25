@@ -8,8 +8,206 @@
 #include "openmc/error.h"
 #include "openmc/random_ray/random_ray.h"
 #include "openmc/surface.h"
+#include "openmc/random_lcg.h" // [TESE] Obrigatório para o prn()
+#include "openmc/settings.h" // [TESE] Para saber se é CE ou MG
 
 namespace openmc {
+
+//==============================================================================
+// BoundaryCondition implementation [TESE - NOVA SEÇÃO]
+//==============================================================================
+
+//#include <cmath>
+//#include <algorithm>
+
+void BoundaryCondition::handle_albedo(Particle& p, const Surface& surf) const
+{
+  // -----------------------------------------------------------------------
+  // [TESE] Lógicas Multigrupo (Vetor ou Matriz)
+  // -----------------------------------------------------------------------
+  if (has_mg_albedo_) {
+    double E_in = p.E();
+    int n_groups = albedo_energy_grid_.size() - 1;
+    int g_in = -1;
+
+    // 1. Localiza o grupo de energia do nêutron
+    for (int i = 0; i < n_groups; ++i) {
+      if (E_in >= albedo_energy_grid_[i] && E_in <= albedo_energy_grid_[i+1]) {
+        g_in = i;
+        break;
+      }
+    }
+
+    if (g_in == -1) {
+      p.wgt() = 0.0; 
+      p.cross_vacuum_bc(surf);
+      return;
+    }
+
+    // =====================================================================
+    // LÓGICA 2: VETOR (Sem troca de grupo ou energia)
+    // =====================================================================
+    if (albedo_matrix_.size() == n_groups) {
+      double prob_reflexao = albedo_matrix_[g_in];
+      
+      if (prn(p.seeds()) < prob_reflexao) {
+        // SOBREVIVEU! A superfície já refletiu a direção dele.
+        // Como não há troca de grupo, apenas limpamos o cache para segurança.
+        p.material_last() = C_NONE;
+        return; 
+      } else {
+        // PERDEU A ROLETA (Vazamento)
+        p.wgt() = 0.0;
+        p.cross_vacuum_bc(surf);
+        return;
+      }
+    }
+
+    // =====================================================================
+    // LÓGICA 3: MATRIZ (Com troca de grupo de energia)
+    // =====================================================================
+    double xi = prn(p.seeds()); 
+    double cumulative_prob = 0.0;
+    int g_out = -1;
+
+    for (int j = 0; j < n_groups; ++j) {
+      cumulative_prob += albedo_matrix_[g_in * n_groups + j];
+      if (xi < cumulative_prob) {
+        g_out = j;
+        break;
+      }
+    }
+
+    if (g_out == -1) {
+      p.wgt() = 0.0; 
+      p.cross_vacuum_bc(surf);
+      return;
+    }
+
+    // Atualiza a energia baseada na matriz
+    double E_out_min = albedo_energy_grid_[g_out];
+    double E_out_max = albedo_energy_grid_[g_out + 1];
+    
+    if (settings::run_CE) {
+      double E_new = E_out_min + prn(p.seeds()) * (E_out_max - E_out_min);
+      // Blindagem das tabelas S(a,b) e ENDF
+      if (E_new < 1e-4) E_new = 1e-4;
+      if (E_new > 19.5e6) E_new = 19.5e6;
+      p.E() = E_new;
+    } else {
+      p.g() = g_out; 
+      p.g_last() = p.g();
+      p.E() = 0.5 * (E_out_min + E_out_max); 
+    }
+
+    // BLINDAGEM MÁXIMA DO VETOR DIRECIONAL (A causa secreta dos crashes)
+    double norm = std::sqrt(p.u().x * p.u().x + p.u().y * p.u().y + p.u().z * p.u().z);
+    if (norm > 0.0) {
+      p.u().x /= norm;
+      p.u().y /= norm;
+      p.u().z /= norm;
+    }
+
+    p.material_last() = C_NONE;
+    return;
+  }
+
+  // -----------------------------------------------------------------------
+  // LÓGICA 1: PADRÃO ORIGINAL (Multiplicador Escalar de Peso)
+  // -----------------------------------------------------------------------
+  if (!has_albedo())
+    return;
+
+  double initial_wgt = p.wgt();
+  p.wgt() *= (1.0 - albedo_);
+  p.cross_vacuum_bc(surf);
+  p.wgt() = initial_wgt * albedo_;
+}
+/*
+void BoundaryCondition::handle_albedo(Particle& p, const Surface& surf) const
+{
+  // -----------------------------------------------------------------------
+  // [TESE] Lógica Multigrupo
+  // -----------------------------------------------------------------------
+  if (has_mg_albedo_) {
+    double E_in = p.E();
+    int n_groups = albedo_energy_grid_.size() - 1;
+    int g_in = -1;
+
+    // 1. Acha o grupo de entrada
+    for (int i = 0; i < n_groups; ++i) {
+      if (E_in >= albedo_energy_grid_[i] && E_in <= albedo_energy_grid_[i+1]) {
+        g_in = i;
+        break;
+      }
+    }
+
+    if (g_in == -1) {
+      p.cross_vacuum_bc(surf);
+      p.wgt() = 0.0;
+      return;
+    }
+
+    // 2. Roleta da matriz de transferência
+    double xi = prn(p.seeds()); 
+    double cumulative_prob = 0.0;
+    int g_out = -1;
+
+    for (int j = 0; j < n_groups; ++j) {
+      cumulative_prob += albedo_matrix_[g_in * n_groups + j];
+      if (xi < cumulative_prob) {
+        g_out = j;
+        break;
+      }
+    }
+
+    if (g_out == -1) {
+      p.cross_vacuum_bc(surf);
+      p.wgt() = 0.0;
+      return;
+    }
+
+    // 3. Atualiza a energia
+    double E_out_min = albedo_energy_grid_[g_out];
+    double E_out_max = albedo_energy_grid_[g_out + 1];
+    
+    if (settings::run_CE) {
+      double E_new = E_out_min + prn(p.seeds()) * (E_out_max - E_out_min);
+      
+      // PREVINE O CRASH DO LOG(0) EM SEÇÕES DE CHOQUE: Mantém a energia do nêutron estritamente dentro da tabela de dados
+      if (E_new < 1e-4) {
+        E_new = 1e-4;
+      }
+      if (E_new >= 19.9999e6) {
+        E_new = 19.9999e6;
+      }
+      
+      p.E() = E_new;
+    }else{
+      p.g() = g_out; // Atualiza o índice do grupo pro motor MGXS do OpenMC
+      p.g_last() = p.g();
+      // Mantém a coerência da energia média para os tallies do OpenMC não se perderem
+      p.E() = 0.5 * (E_out_min + E_out_max);
+    }
+
+    // Força o OpenMC a recalcular as seções de choque macroscópicas para a nova energia
+    // (Exatamente como o OpenMC faz internamente após uma colisão física).
+    p.material_last() = C_NONE;
+    return;
+  }
+
+  // -----------------------------------------------------------------------
+  // Lógica Padrão (Escalar)
+  // -----------------------------------------------------------------------
+  if (!has_albedo())
+    return;
+
+  double initial_wgt = p.wgt();
+  p.wgt() *= (1.0 - albedo_);
+  p.cross_vacuum_bc(surf);
+  p.wgt() = initial_wgt * albedo_;
+}
+*/
 
 //==============================================================================
 // VacuumBC implementation

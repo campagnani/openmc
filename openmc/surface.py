@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 import math
 from numbers import Real
+from collections.abc import Iterable #[TESE]
 from warnings import warn, catch_warnings, simplefilter
 
 import lxml.etree as ET
@@ -162,11 +163,12 @@ class Surface(IDManagerMixin, ABC):
     _atol = 1.e-12
 
     def __init__(self, surface_id=None, boundary_type='transmission',
-                 albedo=1., name=''):
+                 albedo=1., albedo_energy_grid=None, name=''):
         self.id = surface_id
         self.name = name
         self.boundary_type = boundary_type
         self.albedo = albedo
+        self.albedo_energy_grid = albedo_energy_grid # [TESE] Inicializa o grid primeiro para o setter do albedo funcionar
 
         # A dictionary of the quadratic surface coefficients
         # Key      - coefficient name
@@ -232,9 +234,29 @@ class Surface(IDManagerMixin, ABC):
 
     @albedo.setter
     def albedo(self, albedo):
-        check_type('albedo', albedo, Real)
-        check_greater_than('albedo', albedo, 0.0)
-        self._albedo = float(albedo)
+        check_type('albedo', albedo, (Real, Iterable)) # [TESE] Permite que o albedo seja Real ou Iterável (Matriz)
+        if isinstance(albedo, Iterable):
+            # Se for uma matriz multigrupo, converte e achata
+            self._albedo = np.array(albedo).flatten().tolist()
+        else:
+            # Se for escalar
+            check_greater_than('albedo', albedo, 0.0)
+            self._albedo = float(albedo)
+
+    # [TESE] Nova propriedade para o grid de energia
+    @property
+    def albedo_energy_grid(self):
+        return self._albedo_energy_grid
+
+    @albedo_energy_grid.setter
+    def albedo_energy_grid(self, grid):
+        from collections.abc import Iterable
+        if grid is not None:
+            check_type('albedo energy grid', grid, Iterable)
+            self._albedo_energy_grid = list(grid)
+        else:
+            self._albedo_energy_grid = None
+    
 
     @property
     def coefficients(self):
@@ -432,9 +454,15 @@ class Surface(IDManagerMixin, ABC):
         element.set("type", self._type)
         if self.boundary_type != 'transmission':
             element.set("boundary", self.boundary_type)
-            if (self.boundary_type in _ALBEDO_BOUNDARIES and
-                not math.isclose(self.albedo, 1.0)):
-                element.set("albedo", str(self.albedo))
+            if self.boundary_type in _ALBEDO_BOUNDARIES:
+                # [TESE] Lógica de exportação da Matriz vs Escalar
+                if isinstance(self.albedo, list):
+                    element.set("albedo", " ".join(map(str, self.albedo)))
+                    if self.albedo_energy_grid is not None:
+                        element.set("albedo_energy_grid", " ".join(map(str, self.albedo_energy_grid)))
+                elif not math.isclose(self.albedo, 1.0):
+                    element.set("albedo", str(self.albedo))
+                    
         element.set("coeffs", ' '.join([str(self._coefficients.setdefault(key, 0.0))
                                         for key in self._coeff_keys]))
 

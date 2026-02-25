@@ -96,20 +96,52 @@ Surface::Surface(pugi::xml_node surf_node)
     }
 
     if (check_for_node(surf_node, "albedo") && bc_) {
-      double surf_alb = std::stod(get_node_value(surf_node, "albedo"));
+      // Lê o conteúdo da tag <albedo> como um vetor de doubles, independente do tamanho
+      auto alb_array = get_node_array<double>(surf_node, "albedo");
 
-      if (surf_alb < 0.0)
-        fatal_error(fmt::format("Surface {} has an albedo of {}. "
-                                "Albedo values must be positive.",
-          id_, surf_alb));
+      if (alb_array.size() == 1) {
+        // =====================================================================
+        // LÓGICA ORIGINAL: O usuário passou só um número (Escalar)
+        // =====================================================================
+        double surf_alb = alb_array[0];
+        if (surf_alb < 0.0)
+          fatal_error(fmt::format("Surface {} has an albedo of {}. "
+                                  "Albedo values must be positive.", id_, surf_alb));
+        if (surf_alb > 1.0)
+          warning(fmt::format("Surface {} has an albedo of {}. "
+                              "Albedos greater than 1 may cause unphysical behaviour.", id_, surf_alb));
+        bc_->set_albedo(surf_alb);
 
-      if (surf_alb > 1.0)
-        warning(fmt::format("Surface {} has an albedo of {}. "
-                            "Albedos greater than 1 may cause "
-                            "unphysical behaviour.",
-          id_, surf_alb));
+      } else {
+        // =====================================================================
+        // [TESE] LÓGICA NOVA: O usuário passou um Vetor ou Matriz (Multigrupo)
+        // =====================================================================
+        if (!check_for_node(surf_node, "albedo_energy_grid")) {
+          fatal_error(fmt::format("Surface {} has a multi-group albedo matrix, "
+                                  "but 'albedo_energy_grid' is missing.", id_));
+        }
+        auto energy_grid = get_node_array<double>(surf_node, "albedo_energy_grid");
+        int n_groups = energy_grid.size() - 1;
 
-      bc_->set_albedo(surf_alb);
+        //if (n_groups <= 0 || alb_array.size() != (n_groups * n_groups)) {
+        //  fatal_error(fmt::format("Surface {} has invalid MG albedo dimensions. "
+        //                          "Matrix size: {} (Expected {})", 
+        //                          id_, alb_array.size(), n_groups * n_groups));
+        //}
+        
+        if (n_groups <= 0) {
+          fatal_error(fmt::format("Surface {}: 'albedo_energy_grid' invalido.", id_));
+        }
+
+        // Detecta automaticamente: se for igual a N (Vetor), se for N*N (Matriz)
+        if (alb_array.size() != n_groups && alb_array.size() != (n_groups * n_groups)) {
+          fatal_error(fmt::format("Surface {} erro de dimensao de albedo. "
+                                  "Tamanho recebido: {} (Esperava {} para Vetor ou {} para Matriz).", 
+                                  id_, alb_array.size(), n_groups, n_groups * n_groups));
+        }
+
+        bc_->set_mg_albedo(energy_grid, alb_array);
+      }
     }
   }
 }
@@ -1173,7 +1205,8 @@ Direction SurfaceZTorus::normal(Position r) const
 void read_surfaces(pugi::xml_node node,
   std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map)
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map) // [TESE] Adicionado
 {
   // Count the number of surfaces
   int n_surfaces = 0;
@@ -1243,15 +1276,22 @@ void read_surfaces(pugi::xml_node node,
       }
 
       // Check for a periodic surface
-      if (check_for_node(surf_node, "boundary")) {
+      if (check_for_node(surf_node, "boundary")){
         std::string surf_bc = get_node_value(surf_node, "boundary", true, true);
         if (surf_bc == "periodic") {
           periodic_sense_map[model::surfaces.back()->id_] = 0;
           // Check for surface albedo. Skip sanity check as it is already done
           // in the Surface class's constructor.
-          if (check_for_node(surf_node, "albedo")) {
-            albedo_map[model::surfaces.back()->id_] =
-              std::stod(get_node_value(surf_node, "albedo"));
+          if (check_for_node(surf_node, "albedo")) { // [TESE] Modificado
+            auto alb_array = get_node_array<double>(surf_node, "albedo");
+            if (alb_array.size() == 1) {
+              albedo_map[model::surfaces.back()->id_] = alb_array[0];
+            } else {
+              MgAlbedoData mg_data;
+              mg_data.matrix = alb_array;
+              mg_data.energy_grid = get_node_array<double>(surf_node, "albedo_energy_grid");
+              mg_albedo_map[model::surfaces.back()->id_] = mg_data;
+            }
           }
           if (check_for_node(surf_node, "periodic_surface_id")) {
             int i_periodic =
@@ -1262,6 +1302,16 @@ void read_surfaces(pugi::xml_node node,
           } else {
             periodic_pairs.insert({model::surfaces.back()->id_, -1});
           }
+        }
+      
+        // ===================================================================
+        // [TESE] Ler matriz de albedo para superfícies periódicas
+        // ===================================================================
+        if (check_for_node(surf_node, "albedo_energy_grid") && check_for_node(surf_node, "albedo_matrix")) {
+          MgAlbedoData mg_data;
+          mg_data.energy_grid = get_node_array<double>(surf_node, "albedo_energy_grid");
+          mg_data.matrix = get_node_array<double>(surf_node, "albedo_matrix");
+          mg_albedo_map[model::surfaces.back()->id_] = mg_data;
         }
       }
     }
@@ -1282,7 +1332,8 @@ void read_surfaces(pugi::xml_node node,
 
 void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map)
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map) // [TESE] Adicionado
 {
   // Fill the senses map for periodic surfaces
   auto n_periodic = periodic_sense_map.size();
@@ -1409,6 +1460,17 @@ void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
     }
     if (albedo_map.count(surf2.id_)) {
       surf2.bc_->set_albedo(albedo_map[surf2.id_]);
+    }
+    // =========================================================================
+    // [TESE] Aplicar a matriz de albedo se presente no mapa MG
+    // =========================================================================
+    if (mg_albedo_map.count(surf1.id_)) {
+      const auto& mg_data = mg_albedo_map[surf1.id_];
+      surf1.bc_->set_mg_albedo(mg_data.energy_grid, mg_data.matrix);
+    }
+    if (mg_albedo_map.count(surf2.id_)) {
+      const auto& mg_data = mg_albedo_map[surf2.id_];
+      surf2.bc_->set_mg_albedo(mg_data.energy_grid, mg_data.matrix);
     }
   }
 }
