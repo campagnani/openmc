@@ -205,7 +205,7 @@ in the fourth quadrant, the :class:`YPlane` must be replaced by a
 
 Additionally, 'reflective', 'periodic', and 'white' boundary conditions have
 an albedo parameter that can be used to modify the importance of particles
-that encounter the boundary. The albedo value specifies the ratio between
+that encounter the boundary. A scalar albedo specifies the ratio between
 the particle's importance after interaction with the boundary to its initial
 importance. The following example creates a reflective planar surface which
 reduces the reflected particles' importance by 33.3%::
@@ -216,6 +216,27 @@ reduces the reflected particles' importance by 33.3%::
    x1 = openmc.XPlane(1.0)
    x1.boundary_type = 'reflective'
    x1.albedo = 0.667
+
+The albedo may also be given as a function of energy on a user-defined group
+structure. A 1-D sequence of length :math:`N` is a group-wise albedo (the
+particle energy is left unchanged). An :math:`N \times N` array is a transfer
+matrix :math:`P(g_\text{out} \mid g_\text{in})` stored in row-major order; the
+row sum is the survival probability and the outgoing energy is sampled from
+that row. In either case :attr:`Surface.albedo_energy_grid` must provide
+:math:`N+1` strictly increasing energy bounds in eV. Multi-group albedo is
+applied to neutrons; other particle types are reflected without a weight
+change. Incident energies outside the grid are treated as leakage::
+
+   grid = [1e-5, 0.625, 20.0e6]
+   # Group-wise albedo (fast neutrons leak more than thermal)
+   sphere = openmc.Sphere(r=50.0, boundary_type='reflective',
+                          albedo=[0.85, 0.40], albedo_energy_grid=grid)
+
+   # Transfer matrix: downscatter from the fast group into the thermal group
+   matrix = [[0.80, 0.00],
+             [0.15, 0.50]]
+   sphere.albedo = matrix
+   sphere.albedo_energy_grid = grid
 
 .. _usersguide_cells:
 

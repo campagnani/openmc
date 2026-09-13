@@ -64,8 +64,14 @@ The current version of the summary file format is 6.1.
            - **boundary_type** (*char[]*) -- Boundary condition applied to
              the surface. Can be 'transmission', 'vacuum', 'reflective',
              'periodic', or 'white'.
-           - **albedo** (*double*) -- Boundary albedo as a positive multiplier
-             of particle weight. If absent, it is assumed to be 1.0.
+           - **albedo** (*double or double[]*) -- Boundary albedo. A scalar is
+             a positive multiplier of particle weight. An array is a group-wise
+             albedo or a flattened transfer matrix; in that case
+             ``albedo_energy_grid`` is also written. If absent, the scalar
+             albedo is assumed to be 1.0.
+           - **albedo_energy_grid** (*double[]*) -- Energy group bounds in [eV]
+             for a multi-group albedo. Present only when a multi-group albedo
+             is used.
            - **geom_type** (*char[]*) -- Type of geometry used to create the cell.
              Either 'csg' or 'dagmc'.
 

@@ -379,11 +379,10 @@ public:
 // Non-member functions
 //==============================================================================
 
-// [TESE] Estrutura auxiliar para guardar os dados da matriz lidos do XML
-// antes de aplicar às superfícies (especialmente as periódicas).
+//! Multi-group albedo data deferred until periodic BCs are constructed.
 struct MgAlbedoData {
-  std::vector<double> energy_grid;
-  std::vector<double> matrix;
+  vector<double> energy_grid;
+  vector<double> matrix;
 };
 
 //! Read surface definitions from XML and populate the global surfaces vector.
@@ -395,15 +394,17 @@ struct MgAlbedoData {
 //! \param node XML node containing surface definitions
 //! \param[out] periodic_pairs Set of surface ID pairs representing periodic
 //!   boundary conditions
-//! \param[out] albedo_map Map of surface IDs to albedo values for periodic
-//!   surfaces
+//! \param[out] albedo_map Map of surface IDs to scalar albedo values for
+//!   periodic surfaces
 //! \param[out] periodic_sense_map Map of surface IDs to their sense values
 //!   (used to determine orientation for periodic BCs)
+//! \param[out] mg_albedo_map Map of surface IDs to multi-group albedo data for
+//!   periodic surfaces
 void read_surfaces(pugi::xml_node node,
   std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
   std::unordered_map<int, int>& periodic_sense_map,
-  std::unordered_map<int, MgAlbedoData>& mg_albedo_map); // [TESE] Novo mapa
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map);
 
 //! Resolve periodic surface pairs and assign boundary conditions.
 //!
@@ -414,13 +415,16 @@ void read_surfaces(pugi::xml_node node,
 //!
 //! \param[inout] periodic_pairs Set of surface ID pairs representing periodic
 //!   boundary conditions; unpaired entries are resolved
-//! \param albedo_map Map of surface IDs to albedo values for periodic surfaces
+//! \param albedo_map Map of surface IDs to scalar albedo values for periodic
+//!   surfaces
 //! \param periodic_sense_map Map of surface IDs to their sense values (used to
 //!   determine orientation for periodic BCs)
+//! \param mg_albedo_map Map of surface IDs to multi-group albedo data for
+//!   periodic surfaces
 void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
   std::unordered_map<int, int>& periodic_sense_map,
-  std::unordered_map<int, MgAlbedoData>& mg_albedo_map); // [TESE] Novo mapa
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map);
 
 void free_memory_surfaces();
 

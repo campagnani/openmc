@@ -2,10 +2,8 @@
 #define OPENMC_BOUNDARY_CONDITION_H
 
 #include "openmc/hdf5_interface.h"
-#include "openmc/particle.h"
 #include "openmc/position.h"
 #include "openmc/vector.h"
-#include <fmt/core.h>
 
 namespace openmc {
 
@@ -29,58 +27,48 @@ public:
   //! \param surf The specific surface on the boundary the particle struck.
   virtual void handle_particle(Particle& p, const Surface& surf) const = 0;
 
-  //! Modify the incident particle's weight according to the boundary's albedo.
-  //! \param p The particle that struck the boundary.  This function calculates
-  //!   the reduction in the incident particle's weight as it interacts
-  //!   with a boundary. The lost weight is tallied before the remaining weight
-  //!   is reassigned to the incident particle. Implementations of the
-  //!   handle_particle function typically call this method in its body.
+  //! Apply this boundary's albedo to a particle that has struck the surface.
+  //!
+  //! A scalar albedo reduces the particle weight and scores the lost weight as
+  //! leakage. A multi-group albedo (group-wise vector or transfer matrix)
+  //! classifies the incident energy on a user energy grid: the group-wise form
+  //! uses the same weight reduction, while a transfer matrix additionally
+  //! samples an outgoing energy group. Implementations of handle_particle
+  //! typically call this method in its body.
+  //!
+  //! \param p The particle that struck the boundary.
   //! \param surf The specific surface on the boundary the particle struck.
-  void handle_albedo(Particle& p, const Surface& surf) const
-  {
-    if (!has_albedo())
-      return;
-    double initial_wgt = p.wgt();
-    // Treat the lost weight fraction as leakage, similar to VacuumBC.
-    // This ensures the lost weight is tallied properly.
-    p.wgt() *= (1.0 - albedo_);
-    p.cross_vacuum_bc(surf);
-    p.wgt() = initial_wgt * albedo_;
-  };
+  void handle_albedo(Particle& p, const Surface& surf) const;
 
   //! Return a string classification of this BC.
   virtual std::string type() const = 0;
 
   //! Write albedo data of this BC to hdf5.
-  void to_hdf5(hid_t surf_group) const
-  {
-    if (has_albedo()) {
-      write_string(surf_group, "albedo", fmt::format("{}", albedo_), false);
-    }
-  };
+  void to_hdf5(hid_t surf_group) const;
 
-  //! Set albedo of this BC.
+  //! Set a scalar albedo for this BC.
   void set_albedo(double albedo) { albedo_ = albedo; }
 
-  //! Return if this BC has an albedo.
-  bool has_albedo() const { return (albedo_ > 0.0); }
+  //! Set a multi-group albedo defined on \p energy_grid.
+  //!
+  //! \p matrix must contain either N group-wise albedos or an N by N transfer
+  //! matrix stored in row-major order, where N is energy_grid.size() - 1. The
+  //! incident group index is the row.
+  void set_mg_albedo(
+    const vector<double>& energy_grid, const vector<double>& matrix);
 
-  // [TESE] Setters para a matriz
-  void set_mg_albedo(const openmc::vector<double>& energy_grid, const openmc::vector<double>& matrix) {
-    albedo_energy_grid_ = energy_grid;
-    albedo_matrix_ = matrix;
-    has_mg_albedo_ = true;
-  }
-  // [TESE] Verifica se matriz foi setada
+  //! Return if this BC has a scalar albedo.
+  bool has_albedo() const { return albedo_ > 0.0; }
+
+  //! Return if this BC has a multi-group albedo.
   bool has_mg_albedo() const { return has_mg_albedo_; }
 
 private:
-  double albedo_ = -1.0;
+  double albedo_ {-1.0};
 
-  // [TESE] Variáveis da matriz
   bool has_mg_albedo_ {false};
-  openmc::vector<double> albedo_energy_grid_;
-  openmc::vector<double> albedo_matrix_;
+  vector<double> albedo_energy_grid_;
+  vector<double> albedo_matrix_;
 };
 
 //==============================================================================

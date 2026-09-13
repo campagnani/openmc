@@ -47,7 +47,9 @@ LevelInelastic::LevelInelastic(hid_t group)
 
 double LevelInelastic::sample(double E, uint64_t* seed) const
 {
-  return mass_ratio_ * (E - threshold_);
+  // Incoming energy can fall a ulp below threshold_ when E was assigned
+  // independently of this reaction (e.g. a multi-group albedo resample).
+  return std::max(0.0, mass_ratio_ * (E - threshold_));
 }
 
 //==============================================================================

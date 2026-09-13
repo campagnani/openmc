@@ -58,11 +58,13 @@ void read_geometry_xml(pugi::xml_node root)
   std::set<std::pair<int, int>> periodic_pairs;
   std::unordered_map<int, double> albedo_map;
   std::unordered_map<int, int> periodic_sense_map;
-  std::unordered_map<int, MgAlbedoData> mg_albedo_map;// [TESE]
+  std::unordered_map<int, MgAlbedoData> mg_albedo_map;
 
-  read_surfaces(root, periodic_pairs, albedo_map, periodic_sense_map, mg_albedo_map);//[TESE]
+  read_surfaces(
+    root, periodic_pairs, albedo_map, periodic_sense_map, mg_albedo_map);
   read_cells(root);
-  prepare_boundary_conditions(periodic_pairs, albedo_map, periodic_sense_map, mg_albedo_map);//[TESE]
+  prepare_boundary_conditions(
+    periodic_pairs, albedo_map, periodic_sense_map, mg_albedo_map);
   read_lattices(root);
 
   // Check to make sure a boundary condition was applied to at least one
@@ -207,7 +209,7 @@ void finalize_cell_densities()
     // Convert to density multipliers.
     if (!c->density_mult_.empty()) {
       for (int32_t instance = 0; instance < c->density_mult_.size();
-           ++instance) {
+        ++instance) {
         c->density_mult_[instance] /=
           model::materials[c->material(instance)]->density_gpcc();
       }

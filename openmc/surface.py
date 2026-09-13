@@ -4,13 +4,13 @@ from collections.abc import Iterable
 from copy import deepcopy
 import math
 from numbers import Real
-from collections.abc import Iterable #[TESE]
 from warnings import warn, catch_warnings, simplefilter
 
 import lxml.etree as ET
 import numpy as np
 
-from .checkvalue import check_type, check_value, check_length, check_greater_than
+from .checkvalue import (check_type, check_value, check_length,
+                         check_greater_than, check_increasing)
 from .mixin import IDManagerMixin, IDWarning
 from .region import Region, Intersection, Union
 from .bounding_box import BoundingBox
@@ -131,10 +131,20 @@ class Surface(IDManagerMixin, ABC):
         surface. Defaults to transmissive boundary condition where particles
         freely pass through the surface. Note that only axis-aligned
         periodicity is supported around the x-, y-, and z-axes.
-    albedo : float, optional
-        Albedo of the surfaces as a ratio of particle weight after interaction
-        with the surface to the initial weight. Values must be positive. Only
-        applicable if the boundary type is 'reflective', 'periodic', or 'white'.
+    albedo : float or iterable of float, optional
+        Boundary albedo. A scalar is the ratio of particle weight after
+        interaction with the surface to the initial weight and must be
+        positive. An iterable of length ``N`` is a group-wise albedo; an
+        iterable of length ``N*N`` (or an ``N`` by ``N`` array) is a
+        transfer matrix stored in row-major order, where the incident group
+        is the row. Multi-group forms require :attr:`albedo_energy_grid` with
+        ``N+1`` strictly increasing bounds in [eV]. Only applicable if the
+        boundary type is 'reflective', 'periodic', or 'white'.
+    albedo_energy_grid : iterable of float, optional
+        Strictly increasing energy group bounds in [eV] of length ``N+1`` for
+        a multi-group albedo. Ignored for a scalar albedo.
+
+        .. versionadded:: 0.15.5
     name : str, optional
         Name of the surface. If not specified, the name will be the empty
         string.
@@ -144,8 +154,11 @@ class Surface(IDManagerMixin, ABC):
     boundary_type : {'transmission', 'vacuum', 'reflective', 'periodic', 'white'}
         Boundary condition that defines the behavior for particles hitting the
         surface.
-    albedo : float
-        Boundary albedo as a positive multiplier of particle weight
+    albedo : float or list of float
+        Boundary albedo as a positive scalar weight multiplier, a group-wise
+        list of length ``N``, or a flattened ``N`` by ``N`` transfer matrix.
+    albedo_energy_grid : list of float or None
+        Energy group bounds in [eV] for a multi-group albedo.
     coefficients : dict
         Dictionary of surface coefficients
     id : int
@@ -167,8 +180,11 @@ class Surface(IDManagerMixin, ABC):
         self.id = surface_id
         self.name = name
         self.boundary_type = boundary_type
+        self._albedo = 1.0
+        self._albedo_energy_grid = None
+        # Energy grid is set first so the albedo setter can validate sizes.
+        self.albedo_energy_grid = albedo_energy_grid
         self.albedo = albedo
-        self.albedo_energy_grid = albedo_energy_grid # [TESE] Inicializa o grid primeiro para o setter do albedo funcionar
 
         # A dictionary of the quadratic surface coefficients
         # Key      - coefficient name
@@ -188,10 +204,16 @@ class Surface(IDManagerMixin, ABC):
         string += '{0: <20}{1}{2}\n'.format('\tType', '=\t', self._type)
         string += '{0: <20}{1}{2}\n'.format('\tBoundary', '=\t',
                                             self._boundary_type)
-        if (self._boundary_type in _ALBEDO_BOUNDARIES and
-            not math.isclose(self._albedo, 1.0)):
-            string += '{0: <20}{1}{2}\n'.format('\tBoundary Albedo', '=\t',
-                                                self._albedo)
+        if self._boundary_type in _ALBEDO_BOUNDARIES:
+            if isinstance(self._albedo, list):
+                string += '{0: <20}{1}{2}\n'.format('\tBoundary Albedo', '=\t',
+                                                    self._albedo)
+                if self._albedo_energy_grid is not None:
+                    string += '{0: <20}{1}{2}\n'.format(
+                        '\tAlbedo Energy Grid', '=\t', self._albedo_energy_grid)
+            elif not math.isclose(self._albedo, 1.0):
+                string += '{0: <20}{1}{2}\n'.format('\tBoundary Albedo', '=\t',
+                                                    self._albedo)
 
         coefficients = '{0: <20}'.format('\tCoefficients') + '\n'
 
@@ -234,29 +256,63 @@ class Surface(IDManagerMixin, ABC):
 
     @albedo.setter
     def albedo(self, albedo):
-        check_type('albedo', albedo, (Real, Iterable)) # [TESE] Permite que o albedo seja Real ou Iterável (Matriz)
-        if isinstance(albedo, Iterable):
-            # Se for uma matriz multigrupo, converte e achata
-            self._albedo = np.array(albedo).flatten().tolist()
-        else:
-            # Se for escalar
+        if isinstance(albedo, (str, bytes)):
+            raise TypeError('Unable to set "albedo" to a string')
+        if isinstance(albedo, Real):
             check_greater_than('albedo', albedo, 0.0)
             self._albedo = float(albedo)
+            return
 
-    # [TESE] Nova propriedade para o grid de energia
+        check_type('albedo', albedo, Iterable)
+        arr = np.asarray(albedo, dtype=float)
+        if arr.size == 0:
+            raise ValueError('Albedo must contain at least one value')
+        if np.any(arr < 0.0):
+            raise ValueError('Albedo values must be non-negative')
+        self._albedo = arr.flatten().tolist()
+        self._check_mg_albedo()
+
     @property
     def albedo_energy_grid(self):
         return self._albedo_energy_grid
 
     @albedo_energy_grid.setter
     def albedo_energy_grid(self, grid):
-        from collections.abc import Iterable
-        if grid is not None:
-            check_type('albedo energy grid', grid, Iterable)
-            self._albedo_energy_grid = list(grid)
-        else:
+        if grid is None:
             self._albedo_energy_grid = None
-    
+            return
+        check_type('albedo energy grid', grid, Iterable)
+        grid = [float(x) for x in grid]
+        check_length('albedo energy grid', grid, 2)
+        check_increasing('albedo energy grid', grid, equality=False)
+        self._albedo_energy_grid = grid
+        self._check_mg_albedo()
+
+    def _check_mg_albedo(self):
+        """Validate sizes of a multi-group albedo against the energy grid."""
+        if not isinstance(getattr(self, '_albedo', None), list):
+            return
+        if self._albedo_energy_grid is None:
+            return
+        n_groups = len(self._albedo_energy_grid) - 1
+        n_alb = len(self._albedo)
+        if n_alb not in (n_groups, n_groups * n_groups):
+            raise ValueError(
+                f'Multi-group albedo must have {n_groups} entries (group-wise) '
+                f'or {n_groups * n_groups} entries (transfer matrix); got '
+                f'{n_alb}.')
+
+    def _boundary_kwargs(self, surface_id=None):
+        """Keyword arguments that copy this surface's boundary attributes."""
+        kwargs = {
+            'boundary_type': self.boundary_type,
+            'albedo': self.albedo,
+            'albedo_energy_grid': self.albedo_energy_grid,
+            'name': self.name,
+        }
+        if surface_id is not None:
+            kwargs['surface_id'] = surface_id
+        return kwargs 
 
     @property
     def coefficients(self):
@@ -455,11 +511,13 @@ class Surface(IDManagerMixin, ABC):
         if self.boundary_type != 'transmission':
             element.set("boundary", self.boundary_type)
             if self.boundary_type in _ALBEDO_BOUNDARIES:
-                # [TESE] Lógica de exportação da Matriz vs Escalar
                 if isinstance(self.albedo, list):
+                    if self.albedo_energy_grid is None:
+                        raise ValueError(
+                            'Multi-group albedo requires albedo_energy_grid')
                     element.set("albedo", " ".join(map(str, self.albedo)))
-                    if self.albedo_energy_grid is not None:
-                        element.set("albedo_energy_grid", " ".join(map(str, self.albedo_energy_grid)))
+                    element.set("albedo_energy_grid",
+                                " ".join(map(str, self.albedo_energy_grid)))
                 elif not math.isclose(self.albedo, 1.0):
                     element.set("albedo", str(self.albedo))
                     
@@ -493,7 +551,19 @@ class Surface(IDManagerMixin, ABC):
         kwargs['surface_id'] = int(get_text(elem, "id"))
         kwargs['boundary_type'] = get_text(elem, "boundary", "transmission")
         if kwargs['boundary_type'] in _ALBEDO_BOUNDARIES:
-            kwargs['albedo'] = float(get_text(elem, "albedo", 1.0))
+            albedo_str = get_text(elem, "albedo")
+            if albedo_str is not None:
+                values = [float(x) for x in albedo_str.split()]
+                if len(values) == 1:
+                    kwargs['albedo'] = values[0]
+                else:
+                    kwargs['albedo'] = values
+                    grid_str = get_text(elem, "albedo_energy_grid")
+                    if grid_str is None:
+                        raise ValueError(
+                            'Multi-group albedo requires albedo_energy_grid')
+                    kwargs['albedo_energy_grid'] = [
+                        float(x) for x in grid_str.split()]
         kwargs['name'] = get_text(elem, "name")
         coeffs = get_elem_list(elem, "coeffs", float)
         kwargs.update(dict(zip(cls._coeff_keys, coeffs)))
@@ -525,14 +595,22 @@ class Surface(IDManagerMixin, ABC):
         name = group['name'][()].decode() if 'name' in group else ''
 
         bc = group['boundary_type'][()].decode()
-        if 'albedo' in group:
-            bc_alb = float(group['albedo'][()].decode())
+        if 'albedo_energy_grid' in group:
+            bc_alb = group['albedo'][...].tolist()
+            kwargs = {'boundary_type': bc, 'albedo': bc_alb,
+                      'albedo_energy_grid':
+                          group['albedo_energy_grid'][...].tolist(),
+                      'name': name, 'surface_id': surface_id}
         else:
-            bc_alb = 1.0
-        coeffs = group['coefficients'][...]
-        kwargs = {'boundary_type': bc, 'albedo': bc_alb, 'name': name,
-                  'surface_id': surface_id}
+            if 'albedo' in group:
+                raw = group['albedo'][()]
+                bc_alb = float(raw.decode() if isinstance(raw, bytes) else raw)
+            else:
+                bc_alb = 1.0
+            kwargs = {'boundary_type': bc, 'albedo': bc_alb, 'name': name,
+                      'surface_id': surface_id}
 
+        coeffs = group['coefficients'][...]
         surf_type = group['type'][()].decode()
         cls = _SURFACE_CLASSES[surf_type]
 
@@ -675,11 +753,7 @@ class PlaneMixin:
         # Compute new rotated coefficients a, b, c
         a, b, c = Rmat @ [a, b, c]
 
-        kwargs = {'boundary_type': surf.boundary_type,
-                  'albedo': surf.albedo,
-                  'name': surf.name}
-        if inplace:
-            kwargs['surface_id'] = surf.id
+        kwargs = surf._boundary_kwargs(surface_id=surf.id if inplace else None)
 
         surf = Plane(a=a, b=b, c=c, d=d, **kwargs)
 
@@ -1174,10 +1248,8 @@ class QuadricMixin:
         else:
             base_cls = type(tsurf)._virtual_base
             # Copy necessary surface attributes to new kwargs dictionary
-            kwargs = {'boundary_type': tsurf.boundary_type,
-                      'albedo': tsurf.albedo, 'name': tsurf.name}
-            if inplace:
-                kwargs['surface_id'] = tsurf.id
+            kwargs = tsurf._boundary_kwargs(
+                surface_id=tsurf.id if inplace else None)
             kwargs.update({k: getattr(tsurf, k) for k in base_cls._coeff_keys})
             # Create new instance of the virtual base class
             surf = base_cls(**kwargs)
@@ -1385,8 +1457,7 @@ class Cylinder(QuadricMixin, Surface):
         # since the C++ layer doesn't support Cylinders right now
         with catch_warnings():
             simplefilter('ignore', IDWarning)
-            kwargs = {'boundary_type': self.boundary_type, 'albedo': self.albedo,
-                      'name': self.name, 'surface_id': self.id}
+            kwargs = self._boundary_kwargs(surface_id=self.id)
             quad_rep = Quadric(*self._get_base_coeffs(), **kwargs)
         return quad_rep.to_xml_element()
 
@@ -1931,10 +2002,7 @@ class Cone(QuadricMixin, Surface):
         # since the C++ layer doesn't support Cones right now
         with catch_warnings():
             simplefilter('ignore', IDWarning)
-            kwargs = {'boundary_type': self.boundary_type,
-                      'albedo': self.albedo,
-                      'name': self.name,
-                      'surface_id': self.id}
+            kwargs = self._boundary_kwargs(surface_id=self.id)
             quad_rep = Quadric(*self._get_base_coeffs(), **kwargs)
         return quad_rep.to_xml_element()
 
@@ -2370,14 +2438,8 @@ class TorusMixin:
         cls = [XTorus, YTorus, ZTorus][new_index]
 
         # Create rotated torus
-        kwargs = {
-            'boundary_type': surf.boundary_type,
-            'albedo': surf.albedo,
-            'name': surf.name,
-            'a': surf.a, 'b': surf.b, 'c': surf.c
-        }
-        if inplace:
-            kwargs['surface_id'] = surf.id
+        kwargs = surf._boundary_kwargs(surface_id=surf.id if inplace else None)
+        kwargs.update({'a': surf.a, 'b': surf.b, 'c': surf.c})
         surf = cls(x0=center[0], y0=center[1], z0=center[2], **kwargs)
 
         return surf.translate(pivot, inplace=inplace)
