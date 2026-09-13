@@ -38,11 +38,26 @@ Each ``<surface>`` element can have the following attributes or sub-elements:
 
   :boundary:
      The boundary condition for the surface. This can be "transmission",
-     "vacuum", "reflective", or "periodic". Specify which planes are
+     "vacuum", "reflective", "periodic", or "white". Specify which planes are
      periodic and the code will automatically identify which planes are
      paired together.
 
     *Default*: "transmission"
+
+  :albedo:
+     Boundary albedo for reflective, white, or periodic surfaces. A single
+     value is a scalar weight multiplier. Multiple values are a multi-group
+     albedo: :math:`N` entries for a group-wise vector or :math:`N^2` entries
+     for a transfer matrix in row-major order. Multi-group data requires
+     ``albedo_energy_grid``.
+
+    *Default*: 1.0
+
+  :albedo_energy_grid:
+     Strictly increasing energy bounds in eV of length :math:`N+1` that define
+     the groups of a multi-group albedo.
+
+    *Default*: None
 
   :periodic_surface_id:
      If a periodic boundary condition is applied, this attribute identifies the

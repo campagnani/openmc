@@ -700,6 +700,15 @@ reflective boundary condition, where the same processing method will be applied 
 deal with the surface current tallies scoring, except for determining the
 changes of particle's direction according to the procedures in :ref:`white`.
 
+If an albedo is assigned to a reflective, white, or periodic surface, the
+lost particle weight :math:`(1-\alpha)w` is scored as leakage before the
+surviving weight :math:`\alpha w` continues. A scalar :math:`\alpha` leaves
+the energy unchanged. A group-wise albedo uses the same weight reduction
+with :math:`\alpha=\alpha_g` for the incident energy group. A transfer
+matrix uses the row sum as :math:`\alpha` and samples an outgoing group
+from that row; in continuous-energy mode the new energy is drawn uniformly
+in lethargy within the group (clipped to the nuclear-data energy range).
+
 Next, we need to determine what cell is beyond the surface in the direction of
 travel of the particle so that we can evaluate cross sections based on its
 material properties. At initialization, a list of neighboring cells is created

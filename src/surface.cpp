@@ -22,6 +22,59 @@
 
 namespace openmc {
 
+namespace {
+
+//! Parse a scalar or multi-group albedo from XML.
+//!
+//! If \p bc is non-null the albedo is applied immediately. Otherwise the
+//! values are stored in \p albedo_map / \p mg_albedo_map for later use
+//! (periodic surfaces, whose BCs are created after pairing).
+void parse_surface_albedo(pugi::xml_node surf_node, int surf_id,
+  BoundaryCondition* bc, std::unordered_map<int, double>* albedo_map,
+  std::unordered_map<int, MgAlbedoData>* mg_albedo_map)
+{
+  auto alb_array = get_node_array<double>(surf_node, "albedo");
+  if (alb_array.empty())
+    return;
+
+  if (alb_array.size() == 1) {
+    double alb = alb_array[0];
+    if (alb < 0.0) {
+      fatal_error(fmt::format("Surface {} has an albedo of {}. Albedo values "
+                              "must be positive.",
+        surf_id, alb));
+    }
+    if (alb > 1.0) {
+      warning(fmt::format(
+        "Surface {} has an albedo of {}. Albedos greater than 1 may cause "
+        "unphysical behaviour.",
+        surf_id, alb));
+    }
+    if (bc) {
+      bc->set_albedo(alb);
+    } else if (albedo_map) {
+      (*albedo_map)[surf_id] = alb;
+    }
+    return;
+  }
+
+  if (!check_for_node(surf_node, "albedo_energy_grid")) {
+    fatal_error(fmt::format("Surface {} has a multi-group albedo but "
+                            "'albedo_energy_grid' is missing.",
+      surf_id));
+  }
+  MgAlbedoData mg_data;
+  mg_data.matrix = alb_array;
+  mg_data.energy_grid = get_node_array<double>(surf_node, "albedo_energy_grid");
+  if (bc) {
+    bc->set_mg_albedo(mg_data.energy_grid, mg_data.matrix);
+  } else if (mg_albedo_map) {
+    (*mg_albedo_map)[surf_id] = mg_data;
+  }
+}
+
+} // namespace
+
 //==============================================================================
 // Global variables
 //==============================================================================
@@ -96,20 +149,7 @@ Surface::Surface(pugi::xml_node surf_node)
     }
 
     if (check_for_node(surf_node, "albedo") && bc_) {
-      double surf_alb = std::stod(get_node_value(surf_node, "albedo"));
-
-      if (surf_alb < 0.0)
-        fatal_error(fmt::format("Surface {} has an albedo of {}. "
-                                "Albedo values must be positive.",
-          id_, surf_alb));
-
-      if (surf_alb > 1.0)
-        warning(fmt::format("Surface {} has an albedo of {}. "
-                            "Albedos greater than 1 may cause "
-                            "unphysical behaviour.",
-          id_, surf_alb));
-
-      bc_->set_albedo(surf_alb);
+      parse_surface_albedo(surf_node, id_, bc_.get(), nullptr, nullptr);
     }
   }
 }
@@ -1173,7 +1213,8 @@ Direction SurfaceZTorus::normal(Position r) const
 void read_surfaces(pugi::xml_node node,
   std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map)
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map)
 {
   // Count the number of surfaces
   int n_surfaces = 0;
@@ -1247,11 +1288,9 @@ void read_surfaces(pugi::xml_node node,
         std::string surf_bc = get_node_value(surf_node, "boundary", true, true);
         if (surf_bc == "periodic") {
           periodic_sense_map[model::surfaces.back()->id_] = 0;
-          // Check for surface albedo. Skip sanity check as it is already done
-          // in the Surface class's constructor.
           if (check_for_node(surf_node, "albedo")) {
-            albedo_map[model::surfaces.back()->id_] =
-              std::stod(get_node_value(surf_node, "albedo"));
+            parse_surface_albedo(surf_node, model::surfaces.back()->id_,
+              nullptr, &albedo_map, &mg_albedo_map);
           }
           if (check_for_node(surf_node, "periodic_surface_id")) {
             int i_periodic =
@@ -1282,7 +1321,8 @@ void read_surfaces(pugi::xml_node node,
 
 void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
   std::unordered_map<int, double>& albedo_map,
-  std::unordered_map<int, int>& periodic_sense_map)
+  std::unordered_map<int, int>& periodic_sense_map,
+  std::unordered_map<int, MgAlbedoData>& mg_albedo_map)
 {
   // Fill the senses map for periodic surfaces
   auto n_periodic = periodic_sense_map.size();
@@ -1403,12 +1443,20 @@ void prepare_boundary_conditions(std::set<std::pair<int, int>>& periodic_pairs,
         j_sign * (j_surf + 1), i_sign * (i_surf + 1), axis);
     }
 
-    // If albedo data is present in albedo map, set the boundary albedo.
+    // Apply scalar or multi-group albedo stored while the surfaces were read.
     if (albedo_map.count(surf1.id_)) {
       surf1.bc_->set_albedo(albedo_map[surf1.id_]);
     }
     if (albedo_map.count(surf2.id_)) {
       surf2.bc_->set_albedo(albedo_map[surf2.id_]);
+    }
+    if (mg_albedo_map.count(surf1.id_)) {
+      const auto& mg_data = mg_albedo_map[surf1.id_];
+      surf1.bc_->set_mg_albedo(mg_data.energy_grid, mg_data.matrix);
+    }
+    if (mg_albedo_map.count(surf2.id_)) {
+      const auto& mg_data = mg_albedo_map[surf2.id_];
+      surf2.bc_->set_mg_albedo(mg_data.energy_grid, mg_data.matrix);
     }
   }
 }

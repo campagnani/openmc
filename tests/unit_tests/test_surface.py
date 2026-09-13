@@ -821,3 +821,65 @@ def test_normalize():
 
     p2 = openmc.YPlane(1.0)
     assert p1.normalize() == p2.normalize()
+
+
+def test_scalar_albedo():
+    s = openmc.XPlane(1.0, boundary_type='reflective', albedo=0.667)
+    assert s.albedo == pytest.approx(0.667)
+    elem = s.to_xml_element()
+    assert elem.get('albedo') == '0.667'
+    s2 = openmc.Surface.from_xml_element(elem)
+    assert s2.albedo == pytest.approx(0.667)
+    repr(s)
+
+
+def test_mg_albedo_vector():
+    grid = [1e-5, 0.625, 20.0e6]
+    albedo = [0.85, 0.40]
+    s = openmc.Sphere(
+        r=10.0, boundary_type='reflective', albedo=albedo,
+        albedo_energy_grid=grid)
+    assert s.albedo == pytest.approx(albedo)
+    assert s.albedo_energy_grid == pytest.approx(grid)
+
+    elem = s.to_xml_element()
+    assert [float(x) for x in elem.get('albedo').split()] == pytest.approx(albedo)
+    assert [float(x) for x in elem.get('albedo_energy_grid').split()] == pytest.approx(grid)
+    s2 = openmc.Surface.from_xml_element(elem)
+    assert s2.albedo == pytest.approx(albedo)
+    assert s2.albedo_energy_grid == pytest.approx(grid)
+    repr(s)
+
+    # Rotation/translation must preserve the multi-group albedo.
+    sr = s.clone()
+    assert sr.albedo == pytest.approx(albedo)
+    assert sr.albedo_energy_grid == pytest.approx(grid)
+
+
+def test_mg_albedo_matrix():
+    grid = [1e-5, 0.625, 20.0e6]
+    matrix = [[0.80, 0.00], [0.15, 0.50]]
+    s = openmc.XPlane(
+        1.0, boundary_type='white', albedo=matrix, albedo_energy_grid=grid)
+    assert s.albedo == pytest.approx([0.80, 0.00, 0.15, 0.50])
+    elem = s.to_xml_element()
+    s2 = openmc.Surface.from_xml_element(elem)
+    assert s2.albedo == pytest.approx(s.albedo)
+    assert s2.albedo_energy_grid == pytest.approx(grid)
+
+
+def test_mg_albedo_invalid():
+    grid = [1e-5, 0.625, 20.0e6]
+    with pytest.raises(ValueError, match='strictly increasing'):
+        openmc.XPlane(1.0, boundary_type='reflective', albedo=[0.5, 0.5],
+                      albedo_energy_grid=[1.0, 0.5, 20.0])
+    with pytest.raises(ValueError, match='transfer matrix'):
+        openmc.XPlane(1.0, boundary_type='reflective', albedo=[0.5],
+                      albedo_energy_grid=grid)
+    with pytest.raises(ValueError, match='non-negative'):
+        openmc.XPlane(1.0, boundary_type='reflective', albedo=[-0.1, 0.5],
+                      albedo_energy_grid=grid)
+    s = openmc.XPlane(1.0, boundary_type='reflective')
+    s.albedo = [0.5, 0.5]
+    with pytest.raises(ValueError, match='albedo_energy_grid'):
+        s.to_xml_element()

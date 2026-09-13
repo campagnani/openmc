@@ -1,15 +1,203 @@
 #include "openmc/boundary_condition.h"
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
+#include <limits>
 
 #include <fmt/core.h>
 
 #include "openmc/constants.h"
 #include "openmc/error.h"
+#include "openmc/mgxs_interface.h"
+#include "openmc/nuclide.h"
+#include "openmc/particle.h"
+#include "openmc/particle_type.h"
+#include "openmc/random_lcg.h"
 #include "openmc/random_ray/random_ray.h"
+#include "openmc/search.h"
+#include "openmc/settings.h"
 #include "openmc/surface.h"
 
 namespace openmc {
+
+namespace {
+
+//! Reduce particle weight by the albedo and score the lost weight as leakage.
+void apply_weight_albedo(Particle& p, const Surface& surf, double albedo)
+{
+  double initial_wgt = p.wgt();
+  p.wgt() *= (1.0 - albedo);
+  p.cross_vacuum_bc(surf);
+  p.wgt() = initial_wgt * albedo;
+}
+
+//! Sample an energy in [eV] uniformly in lethargy within a group.
+//!
+//! The sampled energy is clipped to the loaded nuclear-data range so that
+//! subsequent cross-section lookups remain on the union energy grid. Groups
+//! whose lower bound is 0 eV are clipped to energy_min (typically 1e-5 eV).
+double sample_ce_energy_in_group(double E_lo, double E_hi, uint64_t* seed)
+{
+  int neutron = ParticleType::neutron().transport_index();
+  double data_lo = data::energy_min[neutron];
+  double data_hi = data::energy_max[neutron];
+  if (!(data_lo > 0.0) || !std::isfinite(data_lo))
+    data_lo = 1.0e-5;
+  if (!(data_hi > data_lo) || !std::isfinite(data_hi))
+    data_hi = 20.0e6;
+
+  E_lo = std::max(E_lo, data_lo);
+  E_hi = std::min(E_hi, data_hi);
+  if (!(E_lo > 0.0) || !std::isfinite(E_lo))
+    E_lo = data_lo;
+  if (!std::isfinite(E_hi) || E_hi <= E_lo) {
+    return std::min(
+      data_hi, std::nextafter(E_lo, std::numeric_limits<double>::infinity()));
+  }
+
+  double E_new =
+    std::exp(std::log(E_lo) + prn(seed) * (std::log(E_hi) - std::log(E_lo)));
+  if (!std::isfinite(E_new) || E_new < data_lo)
+    E_new = data_lo;
+  if (E_new > data_hi)
+    E_new = data_hi;
+  return E_new;
+}
+
+//! Return the albedo group containing E, or -1 if E is outside the grid.
+//! Groups are [E_i, E_{i+1}) except the last group, which is closed.
+int find_albedo_group(const vector<double>& grid, double E)
+{
+  int n_groups = static_cast<int>(grid.size()) - 1;
+  if (n_groups <= 0 || !std::isfinite(E))
+    return -1;
+  if (E < grid.front() || E > grid.back())
+    return -1;
+  if (E == grid.back())
+    return n_groups - 1;
+  return static_cast<int>(upper_bound_index(grid.begin(), grid.end(), E));
+}
+
+} // namespace
+
+//==============================================================================
+// BoundaryCondition implementation
+//==============================================================================
+
+void BoundaryCondition::set_mg_albedo(
+  const vector<double>& energy_grid, const vector<double>& matrix)
+{
+  if (energy_grid.size() < 2) {
+    fatal_error("Multi-group albedo energy grid must contain at least two "
+                "values.");
+  }
+  for (std::size_t i = 1; i < energy_grid.size(); ++i) {
+    if (!(energy_grid[i] > energy_grid[i - 1])) {
+      fatal_error("Multi-group albedo energy grid must be strictly "
+                  "increasing.");
+    }
+  }
+
+  std::size_t n_groups = energy_grid.size() - 1;
+  if (matrix.size() != n_groups && matrix.size() != n_groups * n_groups) {
+    fatal_error(
+      fmt::format("Multi-group albedo must have {} entries (group-wise) or {} "
+                  "entries (transfer matrix); got {}.",
+        n_groups, n_groups * n_groups, matrix.size()));
+  }
+
+  bool any_gt_one = false;
+  for (double v : matrix) {
+    if (v < 0.0) {
+      fatal_error("Multi-group albedo values must be non-negative.");
+    }
+    if (v > 1.0)
+      any_gt_one = true;
+  }
+  if (any_gt_one) {
+    warning("A multi-group albedo value is greater than 1, which may cause "
+            "unphysical behaviour.");
+  }
+
+  albedo_energy_grid_ = energy_grid;
+  albedo_matrix_ = matrix;
+  has_mg_albedo_ = true;
+}
+
+void BoundaryCondition::to_hdf5(hid_t surf_group) const
+{
+  if (has_mg_albedo_) {
+    write_dataset(surf_group, "albedo", albedo_matrix_);
+    write_dataset(surf_group, "albedo_energy_grid", albedo_energy_grid_);
+  } else if (has_albedo()) {
+    write_string(surf_group, "albedo", fmt::format("{}", albedo_), false);
+  }
+}
+
+void BoundaryCondition::handle_albedo(Particle& p, const Surface& surf) const
+{
+  if (has_mg_albedo_) {
+    // Multi-group albedo is defined on a neutron energy grid.
+    if (!p.type().is_neutron())
+      return;
+
+    int n_groups = static_cast<int>(albedo_energy_grid_.size()) - 1;
+    int g_in = find_albedo_group(albedo_energy_grid_, p.E());
+    if (g_in < 0 || g_in >= n_groups) {
+      p.cross_vacuum_bc(surf);
+      return;
+    }
+
+    // Group-wise vector: same weight-reduction treatment as a scalar albedo,
+    // with no change to the particle energy.
+    if (albedo_matrix_.size() == static_cast<std::size_t>(n_groups)) {
+      apply_weight_albedo(p, surf, albedo_matrix_[g_in]);
+      return;
+    }
+
+    // Transfer matrix, stored row-major as P(g_out | g_in). The row sum is the
+    // survival probability; the outgoing group is sampled from the row.
+    double row_sum = 0.0;
+    for (int j = 0; j < n_groups; ++j)
+      row_sum += albedo_matrix_[g_in * n_groups + j];
+
+    apply_weight_albedo(p, surf, row_sum);
+    if (!p.alive() || row_sum <= 0.0)
+      return;
+
+    uint64_t* seed = p.current_seed();
+    double xi = prn(seed) * row_sum;
+    double cumulative = 0.0;
+    int g_out = n_groups - 1;
+    for (int j = 0; j < n_groups; ++j) {
+      cumulative += albedo_matrix_[g_in * n_groups + j];
+      if (xi < cumulative) {
+        g_out = j;
+        break;
+      }
+    }
+
+    double E_lo = albedo_energy_grid_[g_out];
+    double E_hi = albedo_energy_grid_[g_out + 1];
+    if (settings::run_CE) {
+      p.E() = sample_ce_energy_in_group(E_lo, E_hi, seed);
+    } else {
+      p.E() = 0.5 * (E_lo + E_hi);
+      p.g() = data::mg.get_group_index(p.E());
+      p.g_last() = p.g();
+    }
+
+    // Force macroscopic cross sections to be rebuilt at the new energy.
+    p.material_last() = C_NONE;
+    return;
+  }
+
+  if (!has_albedo())
+    return;
+
+  apply_weight_albedo(p, surf, albedo_);
+}
 
 //==============================================================================
 // VacuumBC implementation
@@ -45,6 +233,8 @@ void ReflectiveBC::handle_particle(Particle& p, const Surface& surf) const
 
   // Handle the effects of the surface albedo on the particle's weight.
   BoundaryCondition::handle_albedo(p, surf);
+  if (!p.alive())
+    return;
 
   p.cross_reflective_bc(surf, u);
 }
@@ -63,6 +253,8 @@ void WhiteBC::handle_particle(Particle& p, const Surface& surf) const
 
   // Handle the effects of the surface albedo on the particle's weight.
   BoundaryCondition::handle_albedo(p, surf);
+  if (!p.alive())
+    return;
 
   p.cross_reflective_bc(surf, u);
 }
@@ -140,6 +332,8 @@ void TranslationalPeriodicBC::handle_particle(
 
   // Handle the effects of the surface albedo on the particle's weight.
   BoundaryCondition::handle_albedo(p, surf);
+  if (!p.alive())
+    return;
 
   // Pass the new location and surface to the particle.
   p.cross_periodic_bc(surf, new_r, p.u(), new_surface);
@@ -253,6 +447,8 @@ void RotationalPeriodicBC::handle_particle(
 
   // Handle the effects of the surface albedo on the particle's weight.
   BoundaryCondition::handle_albedo(p, surf);
+  if (!p.alive())
+    return;
 
   // Pass the new location, direction, and surface to the particle.
   p.cross_periodic_bc(surf, new_r, new_u, new_surface);
